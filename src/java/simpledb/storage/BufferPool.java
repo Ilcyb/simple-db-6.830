@@ -3,12 +3,13 @@ package simpledb.storage;
 import simpledb.common.Database;
 import simpledb.common.Permissions;
 import simpledb.common.DbException;
-import simpledb.common.DeadlockException;
 import simpledb.transaction.TransactionAbortedException;
 import simpledb.transaction.TransactionId;
 
 import java.io.*;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -38,8 +39,14 @@ public class BufferPool {
      *
      * @param numPages maximum number of pages in this buffer pool.
      */
+
+    private int numPage;
+    private Map<PageId, Page> pageStore;
+
     public BufferPool(int numPages) {
         // some code goes here
+        this.numPage = numPages;
+        this.pageStore = new ConcurrentHashMap<>();
     }
     
     public static int getPageSize() {
@@ -74,7 +81,14 @@ public class BufferPool {
     public  Page getPage(TransactionId tid, PageId pid, Permissions perm)
         throws TransactionAbortedException, DbException {
         // some code goes here
-        return null;
+        Page requestedPage = pageStore.get(pid);
+        if (requestedPage==null) {
+            if (pageStore.size()==numPage)
+                throw new DbException("Not implement yet!");
+            requestedPage = Database.getCatalog().getDatabaseFile(pid.getTableId()).readPage(pid);
+            pageStore.put(pid, requestedPage);
+        }
+        return requestedPage;
     }
 
     /**

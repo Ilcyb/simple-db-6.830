@@ -23,12 +23,31 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class Catalog {
 
+    class Table {
+        DbFile dbFile;
+        String name;
+        String pkeyField;
+
+        public Table(DbFile dbFile, String name, String pkeyField) {
+            this.dbFile = dbFile;
+            this.name = name;
+            this.pkeyField = pkeyField;
+        }
+    }
+
+    private Map<Integer, Integer> idToTable;
+    private Map<String, Integer> nameToTable;
+    private List<Table> tables;
+
     /**
      * Constructor.
      * Creates a new, empty catalog.
      */
     public Catalog() {
         // some code goes here
+        idToTable = new HashMap<>();
+        nameToTable = new HashMap<>();
+        tables = new ArrayList<>();
     }
 
     /**
@@ -42,6 +61,18 @@ public class Catalog {
      */
     public void addTable(DbFile file, String name, String pkeyField) {
         // some code goes here
+        Table newTable = new Table(file, name, pkeyField);
+        if (nameToTable.containsKey(name)) {
+            Table oldTable = tables.get(nameToTable.get(name));
+            idToTable.remove(oldTable.dbFile.getId());
+            tables.set(nameToTable.get(name), newTable);
+            idToTable.put(newTable.dbFile.getId(), nameToTable.get(name));
+        } else {
+            tables.add(newTable);
+            int newTableIdx = tables.size()-1;
+            nameToTable.put(name, newTableIdx);
+            idToTable.put(newTable.dbFile.getId(), newTableIdx);
+        }
     }
 
     public void addTable(DbFile file, String name) {
@@ -65,7 +96,10 @@ public class Catalog {
      */
     public int getTableId(String name) throws NoSuchElementException {
         // some code goes here
-        return 0;
+        int tableIdx = nameToTable.getOrDefault(name, -1);
+        if (tableIdx==-1)
+            throw new NoSuchElementException();
+        return tables.get(tableIdx).dbFile.getId();
     }
 
     /**
@@ -76,7 +110,10 @@ public class Catalog {
      */
     public TupleDesc getTupleDesc(int tableid) throws NoSuchElementException {
         // some code goes here
-        return null;
+        int tableIdx = idToTable.getOrDefault(tableid, -1);
+        if (tableIdx==-1)
+            throw new NoSuchElementException();
+        return tables.get(tableIdx).dbFile.getTupleDesc();
     }
 
     /**
@@ -87,27 +124,58 @@ public class Catalog {
      */
     public DbFile getDatabaseFile(int tableid) throws NoSuchElementException {
         // some code goes here
-        return null;
+        int tableIdx = idToTable.getOrDefault(tableid, -1);
+        if (tableIdx==-1)
+            throw new NoSuchElementException();
+        return tables.get(tableIdx).dbFile;
     }
 
     public String getPrimaryKey(int tableid) {
         // some code goes here
-        return null;
+        int tableIdx = idToTable.getOrDefault(tableid, -1);
+        if (tableIdx==-1)
+            throw new NoSuchElementException();
+        return tables.get(tableIdx).pkeyField;
+    }
+
+    class Itr implements Iterator<Integer> {
+
+        int cursor;
+
+        @Override
+        public boolean hasNext() {
+            return cursor<=tables.size()-1;
+        }
+
+        @Override
+        public Integer next() {
+            if (cursor>=tables.size())
+                throw new NoSuchElementException();
+            int i = cursor;
+            cursor = i+1;
+            return tables.get(i).dbFile.getId();
+        }
     }
 
     public Iterator<Integer> tableIdIterator() {
         // some code goes here
-        return null;
+        return new Itr();
     }
 
     public String getTableName(int id) {
         // some code goes here
-        return null;
+        int tableIdx = idToTable.getOrDefault(id, -1);
+        if (tableIdx==-1)
+            throw new NoSuchElementException();
+        return tables.get(tableIdx).name;
     }
     
     /** Delete all tables from the catalog */
     public void clear() {
         // some code goes here
+        nameToTable.clear();
+        idToTable.clear();
+        tables.clear();
     }
     
     /**

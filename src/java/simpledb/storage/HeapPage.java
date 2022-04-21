@@ -73,19 +73,17 @@ public class HeapPage implements Page {
     */
     private int getNumTuples() {        
         // some code goes here
-        return 0;
-
+        return (int) Math.floor((BufferPool.getPageSize()*8F)/(td.getSize()*8+1));
+//        floor((BufferPool.getPageSize()*8) / (tuple size * 8 + 1))
     }
 
     /**
      * Computes the number of bytes in the header of a page in a HeapFile with each tuple occupying tupleSize bytes
      * @return the number of bytes in the header of a page in a HeapFile with each tuple occupying tupleSize bytes
      */
-    private int getHeaderSize() {        
-        
+    private int getHeaderSize() {
         // some code goes here
-        return 0;
-                 
+        return (int) Math.ceil(getNumTuples()/8F);
     }
     
     /** Return a view of this page before it was modified
@@ -118,7 +116,7 @@ public class HeapPage implements Page {
      */
     public HeapPageId getId() {
     // some code goes here
-    throw new UnsupportedOperationException("implement this");
+        return pid;
     }
 
     /**
@@ -288,7 +286,27 @@ public class HeapPage implements Page {
      */
     public int getNumEmptySlots() {
         // some code goes here
-        return 0;
+        int count = 0;
+        for (byte b:header) {
+            count+=getBitCount(b, 0);
+        }
+        return count;
+    }
+
+    private int getBitCount(byte b, int countBit) {
+        byte mask = (byte) 0b1000_0000;
+        int count = 0;
+        while (b!=0) {
+            if ((b&mask)!=0)
+                count++;
+            b = (byte) (b<<1);
+        }
+        if (countBit==1)
+            return count;
+        else if (countBit==0)
+            return 8-count;
+        else
+            throw new UnsupportedOperationException();
     }
 
     /**
@@ -296,7 +314,7 @@ public class HeapPage implements Page {
      */
     public boolean isSlotUsed(int i) {
         // some code goes here
-        return false;
+        return ((int) ((header[i/8] >> i%8) & 0x1) == 1);
     }
 
     /**
@@ -307,13 +325,51 @@ public class HeapPage implements Page {
         // not necessary for lab1
     }
 
+    class Itr implements Iterator<Tuple> {
+
+        int cursor;
+        Tuple next;
+
+        Itr() {
+            findNext();
+        }
+
+        @Override
+        public boolean hasNext() {
+            return next!=null;
+        }
+
+        private void findNext() {
+            for (;cursor<tuples.length&&!isSlotUsed(cursor);cursor++) {}
+
+            if (cursor>=tuples.length) {
+                next = null;
+            } else {
+                int i = cursor;
+                cursor = i+1;
+                next = tuples[i];
+            }
+        }
+
+        @Override
+        public Tuple next() {
+            if (next==null) {
+                return next;
+            }
+
+            Tuple tmp = next;
+            findNext();
+            return tmp;
+        }
+    }
+
     /**
      * @return an iterator over all tuples on this page (calling remove on this iterator throws an UnsupportedOperationException)
      * (note that this iterator shouldn't return tuples in empty slots!)
      */
     public Iterator<Tuple> iterator() {
         // some code goes here
-        return null;
+        return new Itr();
     }
 
 }

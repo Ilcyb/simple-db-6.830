@@ -1,7 +1,9 @@
 package simpledb.execution;
 
 import simpledb.common.Type;
-import simpledb.storage.Tuple;
+import simpledb.storage.*;
+
+import java.util.*;
 
 /**
  * Knows how to compute some aggregate over a set of IntFields.
@@ -9,6 +11,12 @@ import simpledb.storage.Tuple;
 public class IntegerAggregator implements Aggregator {
 
     private static final long serialVersionUID = 1L;
+
+    private int gbfield;
+    private Type gbfieldtype;
+    private int afield;
+    private Op what;
+    private Context groupContext;
 
     /**
      * Aggregate constructor
@@ -27,6 +35,30 @@ public class IntegerAggregator implements Aggregator {
 
     public IntegerAggregator(int gbfield, Type gbfieldtype, int afield, Op what) {
         // some code goes here
+        this.gbfield = gbfield;
+        this.gbfieldtype = gbfieldtype;
+        this.afield=afield;
+        this.what=what;
+        this.groupContext = new Context();
+        switch (what) {
+            case MIN:
+                this.groupContext.setStrategy(new MIN());
+                break;
+            case MAX:
+                this.groupContext.setStrategy(new MAX());
+                break;
+            case AVG:
+                this.groupContext.setStrategy(new AVG());
+                break;
+            case SUM:
+                this.groupContext.setStrategy(new SUM());
+                break;
+            case COUNT:
+                this.groupContext.setStrategy(new COUNT());
+                break;
+            default:
+                throw new UnsupportedOperationException("Not implement");
+        }
     }
 
     /**
@@ -38,6 +70,12 @@ public class IntegerAggregator implements Aggregator {
      */
     public void mergeTupleIntoGroup(Tuple tup) {
         // some code goes here
+        Field gfield;
+        if (gbfield==NO_GROUPING)
+            gfield = null;
+        else
+            gfield = tup.getField(gbfield);
+        groupContext.strategy.strategyMethod(groupContext.groupResult, gfield, tup.getField(afield));
     }
 
     /**
@@ -50,8 +88,94 @@ public class IntegerAggregator implements Aggregator {
      */
     public OpIterator iterator() {
         // some code goes here
-        throw new
-        UnsupportedOperationException("please implement me for lab2");
+        TupleDesc aggTd;
+        if (gbfield==NO_GROUPING) {
+            aggTd = new TupleDesc(new Type[]{Type.INT_TYPE},
+                    new String[]{"aggregateVal"});
+        } else {
+            aggTd = new TupleDesc(new Type[]{gbfieldtype, Type.INT_TYPE},
+                    new String[]{"groupVal", "aggregateVal"});
+        }
+        List<Tuple> tuples = new ArrayList<>();
+        for (Map.Entry<Field, Integer> entry:groupContext.groupResult.entrySet()) {
+            Tuple newTuple = new Tuple(aggTd);
+            if (gbfield==NO_GROUPING)
+                newTuple.setField(0, new IntField(entry.getValue()));
+            else {
+                newTuple.setField(0, entry.getKey());
+                newTuple.setField(1, new IntField(entry.getValue()));
+            }
+            tuples.add(newTuple);
+        }
+        return new TupleIterator(aggTd, tuples);
     }
 
+    private class Context {
+        Strategy strategy;
+
+        HashMap<Field, Integer> groupResult;
+
+        Context() {
+            groupResult = new HashMap<>();
+        }
+
+        void setStrategy(Strategy strategy) {
+            this.strategy = strategy;
+        }
+    }
+
+    private interface Strategy {
+        void strategyMethod(HashMap<Field, Integer> groupResult, Field gfield, Field afield);
+    }
+
+    private class COUNT implements Strategy {
+
+        @Override
+        public void strategyMethod(HashMap<Field, Integer> groupResult, Field field, Field afield) {
+            int count = groupResult.getOrDefault(field, 0)+1;
+            groupResult.put(field, count);
+        }
+    }
+
+    private class SUM implements Strategy {
+
+        @Override
+        public void strategyMethod(HashMap<Field, Integer> groupResult, Field field, Field afield) {
+            int sum = groupResult.getOrDefault(field, 0)+((IntField)afield).getValue();
+            groupResult.put(field, sum);
+        }
+    }
+
+    private class AVG implements Strategy {
+
+        private HashMap<Field, Integer> sum = new HashMap<>();
+        private HashMap<Field, Integer> count = new HashMap<>();
+
+        @Override
+        public void strategyMethod(HashMap<Field, Integer> groupResult, Field field, Field afield) {
+            int groupSum = sum.getOrDefault(field, 0)+((IntField)afield).getValue();
+            sum.put(field, groupSum);
+            int groupCount = count.getOrDefault(field, 0)+1;
+            count.put(field, groupCount);
+            groupResult.put(field, groupSum/groupCount);
+        }
+    }
+
+    private class MIN implements Strategy {
+
+        @Override
+        public void strategyMethod(HashMap<Field, Integer> groupResult, Field field, Field afield) {
+            int minVal = Math.min(((IntField)afield).getValue(), groupResult.getOrDefault(field, Integer.MAX_VALUE));
+            groupResult.put(field, minVal);
+        }
+    }
+
+    private class MAX implements Strategy {
+
+        @Override
+        public void strategyMethod(HashMap<Field, Integer> groupResult, Field field, Field afield) {
+            int maxVal = Math.max(((IntField)afield).getValue(), groupResult.getOrDefault(field, Integer.MIN_VALUE));
+            groupResult.put(field, maxVal);
+        }
+    }
 }

@@ -112,6 +112,7 @@ public class SeqScan implements OpIterator {
         String[] fieldArr = new String[rawTD.numFields()];
         String prefix = tableAlias==null?"null":tableAlias;
         for (int i = 0; i < fieldArr.length; i++) {
+            typeArr[i] = rawTD.getFieldType(i);
             fieldArr[i] = String.format("%s.%s",prefix,rawTD.getFieldName(i));
         }
         return new TupleDesc(typeArr, fieldArr);

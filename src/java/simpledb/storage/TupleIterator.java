@@ -35,21 +35,29 @@ public class TupleIterator implements OpIterator {
         }
     }
 
+    private boolean open = false;
+
     public void open() {
+        open = true;
         i = tuples.iterator();
     }
 
     public boolean hasNext() {
+        if (!open)
+            throw new IllegalStateException("Operator not yet open");
         return i.hasNext();
     }
 
     public Tuple next() {
+        if (!open)
+            throw new IllegalStateException("Operator not yet open");
         return i.next();
     }
 
     public void rewind() {
-        close();
-        open();
+        if (!open)
+            throw new IllegalStateException("Operator not yet open");
+        i = tuples.iterator();
     }
 
     public TupleDesc getTupleDesc() {
@@ -57,6 +65,9 @@ public class TupleIterator implements OpIterator {
     }
 
     public void close() {
+        if (!open)
+            throw new IllegalStateException("Operator not yet open");
+        open = false;
         i = null;
     }
 }

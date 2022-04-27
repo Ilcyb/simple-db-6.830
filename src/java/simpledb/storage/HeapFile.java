@@ -90,6 +90,13 @@ public class HeapFile implements DbFile {
     public void writePage(Page page) throws IOException {
         // some code goes here
         // not necessary for lab1
+        int pageNo = page.getId().getPageNumber();
+        if (pageNo>numPages())
+            throw new IllegalStateException("over file");
+        RandomAccessFile raf = new RandomAccessFile(backedFile, "rw");
+        raf.seek((long) pageNo *BufferPool.getPageSize());
+        raf.write(page.getPageData());
+        raf.close();
     }
 
     /**
@@ -104,16 +111,45 @@ public class HeapFile implements DbFile {
     public List<Page> insertTuple(TransactionId tid, Tuple t)
             throws DbException, IOException, TransactionAbortedException {
         // some code goes here
-        return null;
         // not necessary for lab1
+        List<Page> modifiedPages = new ArrayList<>();
+        HeapPage modifiedPage = null;
+        for (int i = 0; i < numPages(); i++) {
+            HeapPageId pageId= new HeapPageId(getId(), i);
+            HeapPage page = (HeapPage) Database.getBufferPool().getPage(tid, pageId, Permissions.READ_WRITE);
+            if (page.getNumEmptySlots()!=0) {
+                modifiedPage=page;
+                break;
+            }
+        }
+        if (modifiedPage==null) { // all pages are full
+            BufferedOutputStream bufferedOutputStream =
+                    new BufferedOutputStream(new FileOutputStream(backedFile, true));
+            byte[] emptyPageData = HeapPage.createEmptyPageData();
+            bufferedOutputStream.write(emptyPageData);
+            bufferedOutputStream.close();
+
+            HeapPageId newPageId = new HeapPageId(getId(), numPages()-1);
+            modifiedPage = (HeapPage) Database.getBufferPool().getPage(tid, newPageId, Permissions.READ_WRITE);
+        }
+        synchronized (modifiedPage){
+            modifiedPage.insertTuple(t);
+            modifiedPages.add(modifiedPage);
+        }
+        return modifiedPages;
     }
 
     // see DbFile.java for javadocs
     public ArrayList<Page> deleteTuple(TransactionId tid, Tuple t) throws DbException,
             TransactionAbortedException {
         // some code goes here
-        return null;
         // not necessary for lab1
+        HeapPage page = (HeapPage) Database.getBufferPool().
+                getPage(tid, t.getRecordId().getPageId(), Permissions.READ_WRITE);
+        synchronized (page) {
+            page.deleteTuple(t);
+        }
+        return new ArrayList<>(List.of(page));
     }
 
     class HeapFileIterator implements DbFileIterator{
@@ -122,9 +158,13 @@ public class HeapFile implements DbFile {
         int pageCur = 0;
         Iterator<Tuple> iterator;
         TransactionId tid;
+        Tuple next;
+        boolean open;
 
         HeapFileIterator(TransactionId tid) {
             this.tid = tid;
+            this.next = null;
+            this.open = false;
         }
 
         Iterator<Tuple> getIterator(int pageNo) throws TransactionAbortedException, DbException {
@@ -139,40 +179,66 @@ public class HeapFile implements DbFile {
         public void open() throws DbException, TransactionAbortedException {
             if (totalPage<=0)
                 throw new NoSuchElementException();
-            iterator = getIterator(0);
+            open = true;
+            pageCur = 0;
+            iterator = getIterator(pageCur++);
+            next = null;
+            while (next==null&&iterator!=null) {
+                if (iterator.hasNext()) {
+                    next=iterator.next();
+                } else {
+                    if (pageCur<totalPage) {
+                        iterator=getIterator(pageCur++);
+                    }else {
+                        return;
+                    }
+                }
+            }
         }
 
         @Override
         public boolean hasNext() throws DbException, TransactionAbortedException {
-            if (iterator==null)
+            if (!open)
                 return false;
-            if (iterator.hasNext())
-                return true;
-            return pageCur+1<totalPage;
+            return next!=null;
         }
 
         @Override
         public Tuple next() throws DbException, TransactionAbortedException, NoSuchElementException {
-            if (iterator==null)
+            if (!open)
+                throw new NoSuchElementException("Not open yet.");
+            if (next==null)
                 throw new NoSuchElementException();
-            Tuple tuple = iterator.next();
-            if (tuple==null) {
-                pageCur++;
-                iterator = getIterator(pageCur);
-                tuple = iterator.next();
+            Tuple ans = next;
+            next=null;
+            while (next==null&&iterator!=null) {
+                if (iterator.hasNext()) {
+                    next=iterator.next();
+                } else {
+                    if (pageCur<totalPage) {
+                        iterator=getIterator(pageCur++);
+                    }else {
+                        break;
+                    }
+                }
             }
-            return tuple;
+
+            return ans;
         }
 
         @Override
         public void rewind() throws DbException, TransactionAbortedException {
-            pageCur=0;
-            iterator=getIterator(pageCur);
+            if (!open)
+                throw new IllegalStateException("Not open yet.");
+            open();
         }
 
         @Override
         public void close() {
+            open=false;
             iterator = null;
+            next=null;
+            pageCur=0;
         }
     }
 

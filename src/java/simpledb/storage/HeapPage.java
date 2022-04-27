@@ -19,13 +19,14 @@ import java.io.*;
  */
 public class HeapPage implements Page {
 
-    final HeapPageId pid;
-    final TupleDesc td;
-    final byte[] header;
-    final Tuple[] tuples;
-    final int numSlots;
-
-    byte[] oldData;
+    private final HeapPageId pid;
+    private final TupleDesc td;
+    private final byte[] header;
+    private final Tuple[] tuples;
+    private final int numSlots;
+    private boolean isDirty;
+    private TransactionId dirtyTransactionId;
+    private byte[] oldData;
     private final Byte oldDataLock= (byte) 0;
 
     /**
@@ -48,6 +49,7 @@ public class HeapPage implements Page {
         this.pid = id;
         this.td = Database.getCatalog().getTupleDesc(id.getTableId());
         this.numSlots = getNumTuples();
+        this.isDirty = false;
         DataInputStream dis = new DataInputStream(new ByteArrayInputStream(data));
 
         // allocate and read the header slots of this page
@@ -249,6 +251,19 @@ public class HeapPage implements Page {
     public void deleteTuple(Tuple t) throws DbException {
         // some code goes here
         // not necessary for lab1
+
+        PageId pageId = t.getRecordId().getPageId();
+        int tupleNo = t.getRecordId().getTupleNumber();
+        if (pageId!=this.pid) {
+            throw new DbException("tuple not in this page");
+        } else if (tuples[tupleNo]==null) {
+            throw new DbException("tuple not exists");
+        } else if (!isSlotUsed(tupleNo)) {
+            throw new DbException("tuple not exists");
+        } else {
+            tuples[tupleNo] = null;
+            markSlotUsed(tupleNo, false);
+        }
     }
 
     /**
@@ -261,6 +276,15 @@ public class HeapPage implements Page {
     public void insertTuple(Tuple t) throws DbException {
         // some code goes here
         // not necessary for lab1
+        if (!t.getTupleDesc().equals(td))
+            throw new DbException("tupledesc mismatched");
+        int idx = getFirstEmptySlot();
+        if (idx==-1)
+            throw new DbException("page is full");
+        tuples[idx] = t;
+        markSlotUsed(idx, true);
+        RecordId rid = new RecordId(pid, idx);
+        t.setRecordId(rid);
     }
 
     /**
@@ -270,6 +294,8 @@ public class HeapPage implements Page {
     public void markDirty(boolean dirty, TransactionId tid) {
         // some code goes here
 	// not necessary for lab1
+        isDirty=dirty;
+        dirtyTransactionId=tid;
     }
 
     /**
@@ -278,7 +304,9 @@ public class HeapPage implements Page {
     public TransactionId isDirty() {
         // some code goes here
 	// Not necessary for lab1
-        return null;      
+        if (!isDirty)
+            return null;
+        return dirtyTransactionId;
     }
 
     /**
@@ -293,6 +321,12 @@ public class HeapPage implements Page {
         return count;
     }
 
+    /**
+     * Returns the number of specify bit in a given byte
+     * @param b
+     * @param countBit
+     * @return count of specify bit
+     */
     private int getBitCount(byte b, int countBit) {
         byte mask = (byte) 0b1000_0000;
         int count = 0;
@@ -318,12 +352,40 @@ public class HeapPage implements Page {
     }
 
     /**
+     * Returns the headers index of first empty slot, if not empty slot,
+     * -1 will be return.
+     * @return
+     */
+    private int getFirstEmptySlot() {
+        byte mask = (byte) 0b0000_0001;
+        for (int i = 0; i < header.length; i++) {
+            byte b = header[i];
+            for (int j = 0; j < 8; j++) {
+                if ((b&mask)==0) {
+                    return i*8+j;
+                }
+                b>>=1;
+            }
+        }
+        return -1;
+    }
+
+    /**
      * Abstraction to fill or clear a slot on this page.
      */
     private void markSlotUsed(int i, boolean value) {
         // some code goes here
         // not necessary for lab1
+        byte b = header[i/8];
+        int pos = i%8;
+        if (value) {
+            b |= 1<<pos;
+        } else {
+            b &= ~(1<<pos);
+        }
+        header[i/8] = b;
     }
+
 
     class Itr implements Iterator<Tuple> {
 

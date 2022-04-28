@@ -8,10 +8,7 @@ import simpledb.transaction.TransactionId;
 
 import java.io.*;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -42,13 +39,13 @@ public class BufferPool {
      * @param numPages maximum number of pages in this buffer pool.
      */
 
-    private int numPage;
-    private Map<PageId, Page> pageStore;
+    private final int numPage;
+    private final LRUMap<PageId, Page> pageStore;
 
     public BufferPool(int numPages) {
         // some code goes here
         this.numPage = numPages;
-        this.pageStore = new ConcurrentHashMap<>();
+        this.pageStore = new LRUMap<>(new ConcurrentHashMap<>());
     }
     
     public static int getPageSize() {
@@ -86,7 +83,7 @@ public class BufferPool {
         Page requestedPage = pageStore.get(pid);
         if (requestedPage==null) {
             if (pageStore.size()==numPage)
-                throw new DbException("Not implement yet!");
+                evictPage();
             requestedPage = Database.getCatalog().getDatabaseFile(pid.getTableId()).readPage(pid);
             pageStore.put(pid, requestedPage);
         }
@@ -202,7 +199,12 @@ public class BufferPool {
     public synchronized void flushAllPages() throws IOException {
         // some code goes here
         // not necessary for lab1
-
+        for (Map.Entry<PageId, Page> entry:pageStore.entrySet()) {
+            Page page = entry.getValue();
+            TransactionId tid = page.isDirty();
+            if (tid!=null)
+                flushPage(entry.getKey());
+        }
     }
 
     /** Remove the specific page id from the buffer pool.
@@ -216,6 +218,7 @@ public class BufferPool {
     public synchronized void discardPage(PageId pid) {
         // some code goes here
         // not necessary for lab1
+        pageStore.remove(pid);
     }
 
     /**
@@ -225,6 +228,8 @@ public class BufferPool {
     private synchronized  void flushPage(PageId pid) throws IOException {
         // some code goes here
         // not necessary for lab1
+        DbFile dbFile = Database.getCatalog().getDatabaseFile(pid.getTableId());
+        dbFile.writePage(pageStore.get(pid));
     }
 
     /** Write all pages of the specified transaction to disk.
@@ -232,6 +237,12 @@ public class BufferPool {
     public synchronized  void flushPages(TransactionId tid) throws IOException {
         // some code goes here
         // not necessary for lab1|lab2
+        for (Map.Entry<PageId, Page> entry:pageStore.entrySet()) {
+            Page page = entry.getValue();
+            TransactionId transactionId = page.isDirty();
+            if (tid==transactionId)
+                flushPage(entry.getKey());
+        }
     }
 
     /**
@@ -241,6 +252,135 @@ public class BufferPool {
     private synchronized  void evictPage() throws DbException {
         // some code goes here
         // not necessary for lab1
+        pageStore.removeLast();
     }
 
+}
+
+class LRUMap<K,V> {
+
+    class LRUEntry {
+        K key;
+        V item;
+        LRUEntry prev;
+        LRUEntry next;
+
+        LRUEntry() {
+            prev=null;
+            next=null;
+        }
+
+        LRUEntry(K key, V item) {
+            this.key = key;
+            this.item = item;
+            prev=null;
+            next=null;
+        }
+    }
+
+    private final Map<K,LRUEntry> itemMap;
+    private final LRUEntry head;
+    private final LRUEntry tail;
+    private int size;
+
+    LRUMap(Map<K, LRUEntry> itemMap) {
+        this.itemMap = itemMap;
+        head = new LRUEntry();
+        tail = new LRUEntry();
+        head.next = tail;
+        tail.prev = head;
+        size=0;
+    }
+
+    V get(K key) {
+        LRUEntry entry = itemMap.get(key);
+        if (entry!=null) {
+            moveInnerEntryToHead(entry);
+            return entry.item;
+        }
+        return null;
+    }
+
+    void put(K key, V item) {
+        LRUEntry entry = itemMap.get(key);
+        if (entry!=null) {
+            moveInnerEntryToHead(entry);
+            return;
+        }
+        entry = new LRUEntry(key, item);
+        itemMap.put(key, entry);
+        moveEntryToHead(entry);
+        size++;
+    }
+
+    V removeLast() {
+        LRUEntry lastEntry = removeLastEntryFromList();
+        size--;
+        itemMap.remove(lastEntry.key);
+        return lastEntry.item;
+    }
+
+    V remove(K key) {
+        LRUEntry entry = itemMap.get(key);
+        if (entry==null)
+            return null;
+        breakFromList(entry);
+        itemMap.remove(entry.key);
+        size--;
+        return entry.item;
+    }
+
+    public int size() {
+        return size;
+    }
+
+    Set<Map.Entry<K, V>> entrySet() {
+        Set<Map.Entry<K, LRUEntry>> lruEntrySet = itemMap.entrySet();
+        Set<Map.Entry<K, V>> entrySet = new HashSet<>();
+        for (Map.Entry<K, LRUEntry> entry:lruEntrySet) {
+            entrySet.add(Map.entry(entry.getKey(), entry.getValue().item));
+        }
+        return entrySet;
+    }
+
+    /**
+     * move specify entry to head
+     * @param entry LRUEntry
+     */
+    private synchronized void moveEntryToHead(LRUEntry entry) {
+        entry.next = head.next;
+        head.next.prev = entry;
+        head.next = entry;
+        entry.prev = head;
+    }
+
+    /**
+     * separate entry from list
+     * @param entry LRUEntry
+     */
+    private synchronized void breakFromList(LRUEntry entry) {
+        entry.prev.next = entry.next;
+        entry.next.prev = entry.prev;
+        entry.prev = null;
+        entry.next = null;
+    }
+
+    /**
+     * move an entry in list to head of list
+     * @param entry LRUEntry
+     */
+    private synchronized void moveInnerEntryToHead(LRUEntry entry) {
+        breakFromList(entry);
+        moveEntryToHead(entry);
+    }
+
+    /**
+     * remove last entry from list
+     * @return LRUEntry
+     */
+    private synchronized LRUEntry removeLastEntryFromList() {
+        LRUEntry last = tail.prev;
+        breakFromList(last);
+        return last;
+    }
 }

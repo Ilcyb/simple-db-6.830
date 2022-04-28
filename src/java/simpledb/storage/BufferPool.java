@@ -230,6 +230,7 @@ public class BufferPool {
         // not necessary for lab1
         DbFile dbFile = Database.getCatalog().getDatabaseFile(pid.getTableId());
         dbFile.writePage(pageStore.get(pid));
+        pageStore.get(pid).markDirty(false, null);
     }
 
     /** Write all pages of the specified transaction to disk.
@@ -252,7 +253,13 @@ public class BufferPool {
     private synchronized  void evictPage() throws DbException {
         // some code goes here
         // not necessary for lab1
-        pageStore.removeLast();
+        PageId removedPid = pageStore.getLast();
+        try {
+            flushPage(removedPid);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        discardPage(removedPid);
     }
 
 }
@@ -313,11 +320,8 @@ class LRUMap<K,V> {
         size++;
     }
 
-    V removeLast() {
-        LRUEntry lastEntry = removeLastEntryFromList();
-        size--;
-        itemMap.remove(lastEntry.key);
-        return lastEntry.item;
+    K getLast() {
+        return tail.prev.key;
     }
 
     V remove(K key) {

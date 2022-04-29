@@ -2,9 +2,18 @@ package simpledb.optimizer;
 
 import simpledb.execution.Predicate;
 
+import java.util.Arrays;
+
 /** A class to represent a fixed-width histogram over a single integer-based field.
  */
 public class IntHistogram {
+
+    private int[] buckets;
+    private int minVal;
+    private int maxVal;
+    private double bucketWidth;
+    private int ntups;
+    private Context context;
 
     /**
      * Create a new IntHistogram.
@@ -24,6 +33,11 @@ public class IntHistogram {
      */
     public IntHistogram(int buckets, int min, int max) {
     	// some code goes here
+        this.buckets = new int[buckets];
+        minVal = min;
+        maxVal = max;
+        bucketWidth = ((maxVal-minVal+1)*1.0D) / buckets;
+        ntups = 0;
     }
 
     /**
@@ -32,6 +46,9 @@ public class IntHistogram {
      */
     public void addValue(int v) {
     	// some code goes here
+        int bucketIdx = computeBucketIdx(v);
+        buckets[bucketIdx]++;
+        ntups++;
     }
 
     /**
@@ -47,7 +64,157 @@ public class IntHistogram {
     public double estimateSelectivity(Predicate.Op op, int v) {
 
     	// some code goes here
-        return -1.0;
+        context = new Context(v);
+        switch (op) {
+            case EQUALS:
+                context.setStrategy(new Equals());
+                break;
+            case GREATER_THAN:
+                context.setStrategy(new GreaterThan());
+                break;
+            case LESS_THAN:
+                context.setStrategy(new LessThan());
+                break;
+            case GREATER_THAN_OR_EQ:
+                context.setStrategy(new GreateThanOrEquals());
+                break;
+            case LESS_THAN_OR_EQ:
+                context.setStrategy(new LessThanOrEquals());
+                break;
+            case NOT_EQUALS:
+                context.setStrategy(new NotEquals());
+                break;
+            default:
+                throw new IllegalStateException("Not supported op");
+        }
+
+        return context.strategyMethod();
+    }
+
+    private class Context {
+
+        private Strategy strategy;
+        private int v;
+
+        public Context(int v) {
+            this.v = v;
+        }
+
+        void setStrategy(Strategy strategy) {
+            this.strategy = strategy;
+        }
+
+        double strategyMethod() {
+            return strategy.strategyMethod(v);
+        }
+    }
+
+    private interface Strategy {
+        double strategyMethod(int v);
+    }
+
+    private class Equals implements Strategy {
+
+        @Override
+        public double strategyMethod(int v) {
+            int bucketIdx = computeBucketIdx(v);
+            return (buckets[bucketIdx]/bucketWidth)/ntups;
+        }
+    }
+
+    private class GreaterThan implements Strategy {
+
+        @Override
+        public double strategyMethod(int v) {
+            if (v<minVal)
+                return 1.0;
+            if (v>maxVal)
+                return 0;
+            int bucketIdx = computeBucketIdx(v);
+            double bRight = (bucketIdx+1)*bucketWidth;
+            double bFrac = buckets[bucketIdx]/(ntups*1D);
+            double bPart = (bRight-v)/bucketWidth;
+            double selectivity = bFrac * bPart;
+            for (int i = bucketIdx+1; i < buckets.length; i++) {
+                selectivity += buckets[i]/(ntups*1D);
+            }
+            return selectivity;
+        }
+    }
+
+    private class LessThan implements Strategy {
+
+        @Override
+        public double strategyMethod(int v) {
+            if (v<minVal)
+                return 0;
+            if (v>maxVal)
+                return 1.0;
+            int bucketIdx = computeBucketIdx(v);
+            double bLeft = bucketIdx*bucketWidth;
+            double bFrac = buckets[bucketIdx]/(ntups*1D);
+            double bPart = (v-bLeft)/bucketWidth;
+            double selectivity = bFrac * bPart;
+            for (int i = 0; i < bucketIdx; i++) {
+                selectivity += buckets[i]/(ntups*1D);
+            }
+            return selectivity;
+        }
+    }
+
+    private class LessThanOrEquals implements Strategy {
+
+        @Override
+        public double strategyMethod(int v) {
+            if (v<minVal)
+                return 0;
+            if (v>maxVal)
+                return 1.0;
+            int bucketIdx = computeBucketIdx(v);
+            double selectivity = (buckets[bucketIdx]/bucketWidth)/ntups;
+            double bLeft = bucketIdx*bucketWidth;
+            double bFrac = buckets[bucketIdx]/(ntups*1D);
+            double bPart = (v-bLeft)/bucketWidth;
+            selectivity += bFrac * bPart;
+            for (int i = 0; i < bucketIdx; i++) {
+                selectivity += buckets[i]/(ntups*1D);
+            }
+            return selectivity;
+        }
+    }
+
+    private class GreateThanOrEquals implements Strategy {
+
+        @Override
+        public double strategyMethod(int v) {
+            if (v<minVal)
+                return 1.0;
+            if (v>maxVal)
+                return 0;
+            int bucketIdx = computeBucketIdx(v);
+            double selectivity = (buckets[bucketIdx]/bucketWidth)/ntups;
+            double bRight = (bucketIdx+1)*bucketWidth;
+            double bFrac = buckets[bucketIdx]/(ntups*1D);
+            double bPart = (bRight-v)/bucketWidth;
+            selectivity += bFrac * bPart;
+            for (int i = bucketIdx+1; i < buckets.length; i++) {
+                selectivity += buckets[i]/(ntups*1D);
+            }
+            return selectivity;
+        }
+    }
+
+    private class NotEquals implements Strategy {
+
+        @Override
+        public double strategyMethod(int v) {
+            int bucketIdx = computeBucketIdx(v);
+            return 1-(buckets[bucketIdx]/bucketWidth)/ntups;
+        }
+    }
+
+    private int computeBucketIdx(int v) {
+        return (int) Math.floor((v-minVal)/bucketWidth);
     }
     
     /**
@@ -63,12 +230,18 @@ public class IntHistogram {
         // some code goes here
         return 1.0;
     }
-    
+
     /**
      * @return A string describing this histogram, for debugging purposes
      */
+    @Override
     public String toString() {
-        // some code goes here
-        return null;
+        return "IntHistogram{" +
+                "buckets=" + Arrays.toString(buckets) +
+                ", minVal=" + minVal +
+                ", maxVal=" + maxVal +
+                ", bucketWidth=" + bucketWidth +
+                ", ntups=" + ntups +
+                '}';
     }
 }

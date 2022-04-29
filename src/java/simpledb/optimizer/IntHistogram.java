@@ -15,6 +15,7 @@ public class IntHistogram {
     private int ntups;
     private Context context;
 
+
     /**
      * Create a new IntHistogram.
      * 
@@ -117,6 +118,8 @@ public class IntHistogram {
 
         @Override
         public double strategyMethod(int v) {
+            if (v>maxVal||v<minVal)
+                return 0.0;
             int bucketIdx = computeBucketIdx(v);
             return (buckets[bucketIdx]/bucketWidth)/ntups;
         }
@@ -168,7 +171,7 @@ public class IntHistogram {
         public double strategyMethod(int v) {
             if (v<minVal)
                 return 0;
-            if (v>maxVal)
+            if (v>=maxVal)
                 return 1.0;
             int bucketIdx = computeBucketIdx(v);
             double selectivity = (buckets[bucketIdx]/bucketWidth)/ntups;
@@ -187,7 +190,7 @@ public class IntHistogram {
 
         @Override
         public double strategyMethod(int v) {
-            if (v<minVal)
+            if (v<=minVal)
                 return 1.0;
             if (v>maxVal)
                 return 0;
@@ -208,6 +211,8 @@ public class IntHistogram {
 
         @Override
         public double strategyMethod(int v) {
+            if (v>maxVal||v<minVal)
+                return 1;
             int bucketIdx = computeBucketIdx(v);
             return 1-(buckets[bucketIdx]/bucketWidth)/ntups;
         }

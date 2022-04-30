@@ -3,7 +3,6 @@ package simpledb.optimizer;
 import simpledb.common.Database;
 import simpledb.ParsingException;
 import simpledb.execution.*;
-import simpledb.storage.TupleDesc;
 
 import java.util.*;
 
@@ -257,7 +256,32 @@ public class JoinOptimizer {
 
         // some code goes here
         //Replace the following
-        return joins;
+
+        PlanCache planCache = new PlanCache();
+
+        for (int i = 1; i <= joins.size() ; i++) {
+            Set<Set<LogicalJoinNode>> subsets = enumerateSubsets(joins, i);
+            for (Set<LogicalJoinNode> s : subsets) {
+                double bestCost = Double.MAX_VALUE;
+                planCache.addPlan(s, bestCost, Integer.MAX_VALUE, new ArrayList<>(s));
+                for (LogicalJoinNode joinToRemove:s) {
+                    CostCard costCard = computeCostAndCardOfSubplan(stats, filterSelectivities, joinToRemove, s,
+                            bestCost, planCache);
+                    if (costCard==null) {
+                        continue;
+                    }
+                    if (costCard.cost<bestCost) {
+                        bestCost=costCard.cost;
+                        planCache.addPlan(s, bestCost, costCard.card, costCard.plan);
+                    }
+                }
+            }
+        }
+
+        if (explain)
+            printJoins(joins, planCache, stats, filterSelectivities);
+
+        return planCache.getOrder(new HashSet<>(joins));
     }
 
     // ===================== Private Methods =================================

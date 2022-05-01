@@ -2,9 +2,7 @@ package simpledb.storage;
 
 import simpledb.common.Database;
 import simpledb.common.DbException;
-import simpledb.common.Debug;
 import simpledb.common.Permissions;
-import simpledb.transaction.Transaction;
 import simpledb.transaction.TransactionAbortedException;
 import simpledb.transaction.TransactionId;
 
@@ -114,29 +112,51 @@ public class HeapFile implements DbFile {
         // not necessary for lab1
         List<Page> modifiedPages = new ArrayList<>();
         HeapPage modifiedPage = null;
-        for (int i = 0; i < numPages(); i++) {
-            HeapPageId pageId= new HeapPageId(getId(), i);
-            HeapPage page = (HeapPage) Database.getBufferPool().getPage(tid, pageId, Permissions.READ_WRITE);
-            if (page.getNumEmptySlots()!=0) {
-                modifiedPage=page;
-                break;
+        modifiedPage = getFreePage(tid);
+
+        if (modifiedPage==null) { // all pages are full
+            synchronized (this) {
+                // double check
+                modifiedPage = getFreePage(tid);
+                if (modifiedPage==null) {
+                    BufferedOutputStream bufferedOutputStream =
+                            new BufferedOutputStream(new FileOutputStream(backedFile, true));
+                    byte[] emptyPageData = HeapPage.createEmptyPageData();
+                    bufferedOutputStream.write(emptyPageData);
+                    bufferedOutputStream.close();
+
+                    HeapPageId newPageId = new HeapPageId(getId(), numPages()-1);
+                    modifiedPage = (HeapPage) Database.getBufferPool().getPage(tid, newPageId, Permissions.READ_WRITE);
+                }
             }
         }
-        if (modifiedPage==null) { // all pages are full
-            BufferedOutputStream bufferedOutputStream =
-                    new BufferedOutputStream(new FileOutputStream(backedFile, true));
-            byte[] emptyPageData = HeapPage.createEmptyPageData();
-            bufferedOutputStream.write(emptyPageData);
-            bufferedOutputStream.close();
 
-            HeapPageId newPageId = new HeapPageId(getId(), numPages()-1);
-            modifiedPage = (HeapPage) Database.getBufferPool().getPage(tid, newPageId, Permissions.READ_WRITE);
-        }
-        synchronized (modifiedPage){
-            modifiedPage.insertTuple(t);
-            modifiedPages.add(modifiedPage);
-        }
+        modifiedPage.insertTuple(t);
+        modifiedPages.add(modifiedPage);
         return modifiedPages;
+    }
+
+    /**
+     * get the page with extra space
+     * @param tid
+     * @return HeapPage
+     * @throws TransactionAbortedException
+     * @throws DbException
+     */
+    private HeapPage getFreePage(TransactionId tid) throws TransactionAbortedException, DbException {
+        HeapPage modifiedPage = null;
+        BufferPool bufferPool = Database.getBufferPool();
+        for (int i = 0; i < numPages(); i++) {
+            HeapPageId pageId= new HeapPageId(getId(), i);
+            HeapPage page = (HeapPage) bufferPool.getPage(tid, pageId, Permissions.READ_ONLY);
+            if (page.getNumEmptySlots()!=0) {
+                modifiedPage= (HeapPage) bufferPool.getPage(tid, pageId, Permissions.READ_WRITE);
+                break;
+            }
+            // unlock page lock after scan finished
+            bufferPool.unsafeReleasePage(tid, pageId);
+        }
+        return modifiedPage;
     }
 
     // see DbFile.java for javadocs
@@ -146,9 +166,7 @@ public class HeapFile implements DbFile {
         // not necessary for lab1
         HeapPage page = (HeapPage) Database.getBufferPool().
                 getPage(tid, t.getRecordId().getPageId(), Permissions.READ_WRITE);
-        synchronized (page) {
-            page.deleteTuple(t);
-        }
+        page.deleteTuple(t);
         return new ArrayList<>(List.of(page));
     }
 

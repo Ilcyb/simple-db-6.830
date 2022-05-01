@@ -273,7 +273,21 @@ public class BufferPool {
     private synchronized  void evictPage() throws DbException {
         // some code goes here
         // not necessary for lab1
-        PageId removedPid = pageStore.getLast();
+
+        Page cleanPage = null;
+        for (LRUMap<PageId, Page>.ValIterator it = pageStore.ValIterator(); it.hasNext(); ) {
+            Page page = it.next();
+            if (page.isDirty()!=null) {
+                continue;
+            }
+            cleanPage=page;
+        }
+
+        if (cleanPage==null) {
+            throw new DbException("There are no clean page to evict");
+        }
+
+        PageId removedPid = cleanPage.getId();
         try {
             flushPage(removedPid);
         } catch (IOException e) {
@@ -406,6 +420,24 @@ class LRUMap<K,V> {
         LRUEntry last = tail.prev;
         breakFromList(last);
         return last;
+    }
+
+    class ValIterator implements Iterator {
+        LRUEntry next = tail.prev;
+
+        @Override
+        public boolean hasNext() {
+            return next!=head;
+        }
+
+        @Override
+        public V next() {
+            return next.item;
+        }
+    }
+
+    public ValIterator ValIterator() {
+        return new ValIterator();
     }
 }
 

@@ -41,6 +41,7 @@ public class BufferPool {
 
     private final int numPage;
     private final LRUMap<PageId, Page> pageStore;
+    private final Map<TransactionId, Set<PageId>> tranPageMap;
 
     private final LockManager lockManager;
 
@@ -49,6 +50,7 @@ public class BufferPool {
         this.numPage = numPages;
         this.pageStore = new LRUMap<>(new ConcurrentHashMap<>());
         this.lockManager = new LockManager();
+        this.tranPageMap = new ConcurrentHashMap<>();
     }
     
     public static int getPageSize() {
@@ -91,6 +93,9 @@ public class BufferPool {
             pageStore.put(pid, requestedPage);
         }
 
+        // save relationship between transaction and page
+        tranPageMap.computeIfAbsent(tid, k->new HashSet<>()).add(pid);
+
         if (perm==Permissions.READ_ONLY)
             lockManager.acquireSharedLock(tid, requestedPage);
         else if (perm==Permissions.READ_WRITE)
@@ -98,7 +103,7 @@ public class BufferPool {
         else
             throw new IllegalStateException("Not supported type");
 
-        return requestedPage;
+        return pageStore.get(pid);
     }
 
     /**
@@ -128,11 +133,7 @@ public class BufferPool {
     public void transactionComplete(TransactionId tid) {
         // some code goes here
         // not necessary for lab1|lab2
-        try {
-            lockManager.releaseAllLock(tid);
-        } catch (DbException e) {
-            e.printStackTrace();
-        }
+        transactionComplete(tid, true);
     }
 
     /** Return true if the specified transaction has a lock on the specified page */
@@ -152,6 +153,33 @@ public class BufferPool {
     public void transactionComplete(TransactionId tid, boolean commit) {
         // some code goes here
         // not necessary for lab1|lab2
+        if (!commit) {
+            // revert page data
+            for (PageId pageId:tranPageMap.get(tid)) {
+                Page page = pageStore.get(pageId);
+                // clean page of this transaction, have been evict from pageStore
+                if (page==null) {
+                    continue;
+                }
+                pageStore.put(pageId, page.getBeforeImage());
+            }
+        } else {
+            // save dirty page data to disk
+            try {
+                flushPages(tid);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        // release all locks
+        try {
+            lockManager.releaseAllLock(tid);
+        } catch (DbException e) {
+            e.printStackTrace();
+        }
+
+        tranPageMap.remove(tid);
     }
 
     /**
@@ -258,11 +286,15 @@ public class BufferPool {
     public synchronized  void flushPages(TransactionId tid) throws IOException {
         // some code goes here
         // not necessary for lab1|lab2
-        for (Map.Entry<PageId, Page> entry:pageStore.entrySet()) {
-            Page page = entry.getValue();
-            TransactionId transactionId = page.isDirty();
-            if (tid==transactionId)
-                flushPage(entry.getKey());
+        for (PageId pageId:tranPageMap.get(tid)) {
+            Page page = pageStore.get(pageId);
+            // clean page of this transaction, have been evict from pageStore
+            if (page==null) {
+                continue;
+            }
+            if (page.isDirty()!=null) {
+                flushPage(pageId);
+            }
         }
     }
 
@@ -281,6 +313,7 @@ public class BufferPool {
                 continue;
             }
             cleanPage=page;
+            break;
         }
 
         if (cleanPage==null) {
@@ -345,6 +378,7 @@ class LRUMap<K,V> {
     void put(K key, V item) {
         LRUEntry entry = itemMap.get(key);
         if (entry!=null) {
+            entry.item = item;
             moveInnerEntryToHead(entry);
             return;
         }
@@ -432,7 +466,9 @@ class LRUMap<K,V> {
 
         @Override
         public V next() {
-            return next.item;
+            V res = next.item;
+            next=next.prev;
+            return res;
         }
     }
 

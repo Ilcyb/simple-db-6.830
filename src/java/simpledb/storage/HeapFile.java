@@ -150,6 +150,7 @@ public class HeapFile implements DbFile {
             HeapPageId pageId= new HeapPageId(getId(), i);
             HeapPage page = (HeapPage) bufferPool.getPage(tid, pageId, Permissions.READ_ONLY);
             if (page.getNumEmptySlots()!=0) {
+                bufferPool.unsafeReleasePage(tid, pageId);
                 modifiedPage= (HeapPage) bufferPool.getPage(tid, pageId, Permissions.READ_WRITE);
                 break;
             }

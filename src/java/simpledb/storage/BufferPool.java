@@ -10,8 +10,6 @@ import java.io.*;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * BufferPool manages the reading and writing of pages into memory from
@@ -93,14 +91,12 @@ public class BufferPool {
             pageStore.put(pid, requestedPage);
         }
 
-        Lock pageLock;
         if (perm==Permissions.READ_ONLY)
-            pageLock = lockManager.acquireSharedLock(tid, pid);
+            lockManager.acquireSharedLock(tid, requestedPage);
         else if (perm==Permissions.READ_WRITE)
-            pageLock = lockManager.acquireExclusiveLock(tid, pid);
+            lockManager.acquireExclusiveLock(tid, requestedPage);
         else
             throw new IllegalStateException("Not supported type");
-        pageLock.lock();
 
         return requestedPage;
     }
@@ -117,7 +113,11 @@ public class BufferPool {
     public void unsafeReleasePage(TransactionId tid, PageId pid) {
         // some code goes here
         // not necessary for lab1|lab2
-        lockManager.releaseLock(tid, pid);
+        try {
+            lockManager.releaseLock(tid, pid);
+        } catch (DbException e) {
+            e.printStackTrace();
+        }
     }
 
     /**
@@ -128,6 +128,11 @@ public class BufferPool {
     public void transactionComplete(TransactionId tid) {
         // some code goes here
         // not necessary for lab1|lab2
+        try {
+            lockManager.releaseAllLock(tid);
+        } catch (DbException e) {
+            e.printStackTrace();
+        }
     }
 
     /** Return true if the specified transaction has a lock on the specified page */
@@ -406,13 +411,117 @@ class LRUMap<K,V> {
 
 enum LockType {
     SHARED_LOCK,
-    EXCLUSIVE_LOCK
+    EXCLUSIVE_LOCK,
+    NO_LOCK
+}
+
+class Lock {
+    private final Map<TransactionId, LockType> transactionIdLockTypeMap;
+    private final Page page;
+    private LockType type;
+    private boolean status;
+
+    Lock(Page page) {
+        this.page = page;
+        this.status = false;
+        this.type = LockType.NO_LOCK;
+        this.transactionIdLockTypeMap = new ConcurrentHashMap<>();
+    }
+
+    public void lock(TransactionId acquireTid, LockType acquireType) throws InterruptedException {
+
+        if (transactionIdLockTypeMap.containsKey(acquireTid) && type==LockType.EXCLUSIVE_LOCK)
+            return;
+
+        // lock upgrade from shared lock to exclusive lock
+        if (transactionIdLockTypeMap.size()==1
+                && transactionIdLockTypeMap.containsKey(acquireTid)
+                && type==LockType.SHARED_LOCK
+                && acquireType==LockType.EXCLUSIVE_LOCK) {
+            type = LockType.EXCLUSIVE_LOCK;
+            return;
+        }
+
+        if (type == LockType.NO_LOCK) {
+            transactionIdLockTypeMap.put(acquireTid, acquireType);
+            type = acquireType;
+            status = true;
+            return;
+        }
+
+        if (type == LockType.SHARED_LOCK) {
+            if (acquireType == LockType.SHARED_LOCK) {
+                transactionIdLockTypeMap.put(acquireTid, acquireType);
+                return;
+            } else if (acquireType == LockType.EXCLUSIVE_LOCK) {
+                synchronized (page) {
+                    while (true) {
+                        if (type == LockType.NO_LOCK && !status) {
+                            transactionIdLockTypeMap.put(acquireTid, acquireType);
+                            type = LockType.EXCLUSIVE_LOCK;
+                            status = true;
+                            return;
+                        } else {
+                            page.wait();
+                        }
+                    }
+                }
+            }
+        }
+
+        if (type == LockType.EXCLUSIVE_LOCK) {
+            synchronized (page) {
+                while (true) {
+                    if (type == LockType.NO_LOCK && !status) {
+                        transactionIdLockTypeMap.put(acquireTid, acquireType);
+                        type = acquireType;
+                        status = true;
+                        return;
+                    } else {
+                        page.wait();
+                    }
+                }
+            }
+        }
+
+        throw new IllegalStateException("Not supported lock type");
+    }
+
+    public synchronized void unlock(TransactionId tid) throws DbException {
+        if (!transactionIdLockTypeMap.containsKey(tid)) {
+            throw new DbException("Attempt to unlock a lock that does not belong to the transaction");
+        }
+
+        if (type==LockType.NO_LOCK) {
+            throw new DbException("There are no lock to unlock");
+        }
+
+        LockType acquiredLockType = transactionIdLockTypeMap.get(tid);
+        if (acquiredLockType!=type) {
+            throw new DbException("Lock type not match");
+        }
+
+        synchronized (page) {
+            transactionIdLockTypeMap.remove(tid);
+            if (transactionIdLockTypeMap.isEmpty()) {
+                type = LockType.NO_LOCK;
+                status = false;
+                page.notifyAll();
+            } else if (type==LockType.EXCLUSIVE_LOCK) {
+                throw new DbException("Shouldn't be here");
+            }
+        }
+    }
+
+    public boolean isFreeLock() {
+        return transactionIdLockTypeMap.isEmpty() && type==LockType.NO_LOCK && !status;
+    }
 }
 
 class LockManager {
 
-    private Map<PageId, ReentrantReadWriteLock> pageRWLockMap;
-    private Map<TransactionId, Map<PageId, Lock>> transactionMap;
+    private Map<PageId, Lock> pageRWLockMap;
+    private Map<TransactionId, Set<PageId>> transactionMap;
 
     LockManager() {
         // lockMap 有多个线程同时访问同一个 Page 对应的锁的风险，因此要使用 ConcurrentHashMap
@@ -423,102 +532,77 @@ class LockManager {
     /**
      * acquire shared lock for a page
      * @param tid TransactionId
-     * @param pid PageId
-     * @return Lock
+     * @param page Page
      */
-    Lock acquireSharedLock(TransactionId tid, PageId pid) {
-        return transactionAcquirePageLock(tid, pid, LockType.SHARED_LOCK);
+    void acquireSharedLock(TransactionId tid, Page page) {
+        transactionAcquirePageLock(tid, page, LockType.SHARED_LOCK);
     }
 
     /**
      * acquire exclusive lock for a page
      * @param tid TransactionId
-     * @param pid PageId
-     * @return Lock
+     * @param page Page
      */
-    Lock acquireExclusiveLock(TransactionId tid, PageId pid) {
-        return transactionAcquirePageLock(tid, pid, LockType.EXCLUSIVE_LOCK);
+    void acquireExclusiveLock(TransactionId tid, Page page) {
+        transactionAcquirePageLock(tid, page, LockType.EXCLUSIVE_LOCK);
     }
 
     /**
      * Release page lock for transaction
      * @param tid TransactionId
-     * @param pid PageId
+     * @param pageId PageId
      * @throws DbException
      */
-    void releaseLock(TransactionId tid, PageId pid) {
-        Map<PageId, Lock> tpLockMap = transactionMap.get(tid);
-        if (tpLockMap==null) {
-            System.err.println("(Transaction:"+tid.getId()+") does not have any lock");
-            return;
-        }
+    void releaseLock(TransactionId tid, PageId pageId) throws DbException {
+        Lock lock = pageRWLockMap.get(pageId);
 
-        Lock lock = tpLockMap.get(pid);
         if (lock==null) {
             System.err.printf("(Transaction:%d) does not have lock for (Table:%d,Page:%d)%n",
-                    tid.getId(), pid.getTableId(), tid.getId());
+                    tid.getId(), pageId.getTableId(), pageId.getPageNumber());
             return;
         }
 
-        lock.unlock();
+        lock.unlock(tid);
+        transactionMap.get(tid).remove(pageId);
     }
 
-    void releaseAllLock(TransactionId tid) {
-        Map<PageId, Lock> tpLockMap = transactionMap.get(tid);
-        if (tpLockMap==null) {
-            System.err.println("(Transaction:"+tid.getId()+") does not have any lock");
-            return;
-        }
+    /**
+     * release all lock for a transaction
+     * @param tid
+     * @throws DbException
+     */
+    void releaseAllLock(TransactionId tid) throws DbException {
 
-        for (Map.Entry<PageId, Lock> pageIdLockEntry:tpLockMap.entrySet()) {
-            pageIdLockEntry.getValue().unlock();
-            ReentrantReadWriteLock pageReadWriteLock = pageRWLockMap.get(pageIdLockEntry.getKey());
-            // there are no any locks in this page, thus remove RWLock for it
-            if (!pageReadWriteLock.isWriteLocked() && pageReadWriteLock.getReadLockCount()==0) {
-                pageRWLockMap.remove(pageIdLockEntry.getKey());
-            }
+        for (PageId pageId:transactionMap.get(tid)) {
+            Lock lock = pageRWLockMap.get(pageId);
+            lock.unlock(tid);
+            if (lock.isFreeLock())
+                pageRWLockMap.remove(pageId);
         }
 
         transactionMap.remove(tid);
     }
 
     boolean holdsLock(TransactionId tid, PageId pid) {
-        Map<PageId, Lock> tpLockMap = transactionMap.get(tid);
-        if (tpLockMap==null)
-            return false;
-
-        return tpLockMap.containsKey(pid);
+        return pageRWLockMap.containsKey(pid) && transactionMap.get(tid).contains(pid);
     }
 
     /**
      *
-     * @param tid TransactionId
-     * @param pid PageId
-     * @param type LockType
-     * @return Lock
+     * @param tid
+     * @param page
+     * @param type
      */
-    private Lock transactionAcquirePageLock(TransactionId tid, PageId pid, LockType type) {
-        Map<PageId, Lock> tpLockMap =
-                transactionMap.computeIfAbsent(tid, k -> new HashMap<>());
-        Lock lock = tpLockMap.get(pid);
-        if (lock!=null) {
-            try {
-                lock.unlock();
-            } catch (IllegalMonitorStateException ignored) {}
-            if ((type==LockType.SHARED_LOCK && lock instanceof ReentrantReadWriteLock.ReadLock) ||
-                    lock instanceof ReentrantReadWriteLock.WriteLock)
-                return lock;
-        }
+    private void transactionAcquirePageLock(TransactionId tid, Page page, LockType type) {
+        PageId pid = page.getId();
+        Lock lock = pageRWLockMap.computeIfAbsent(pid, k -> new Lock(page));
+        Set<PageId> transactionPidSet = transactionMap.computeIfAbsent(tid, k -> new HashSet<PageId>());
+        transactionPidSet.add(pid);
 
-        ReentrantReadWriteLock pageRWLock =
-                pageRWLockMap.computeIfAbsent(pid, k -> new ReentrantReadWriteLock());
-        if (type==LockType.SHARED_LOCK)
-            lock = pageRWLock.readLock();
-        else if (type==LockType.EXCLUSIVE_LOCK)
-            lock = pageRWLock.writeLock();
-        else
-            throw new IllegalStateException("Not support type");
-        tpLockMap.put(pid, lock);
-        return lock;
+        try {
+            lock.lock(tid, type);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
     }
 }

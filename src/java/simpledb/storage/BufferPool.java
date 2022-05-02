@@ -96,6 +96,15 @@ public class BufferPool {
         // save relationship between transaction and page
         tranPageMap.computeIfAbsent(tid, k->new HashSet<>()).add(pid);
 
+        // deadlock detection, detection must be before at acquireLock
+        LockType lockType = LockType.NO_LOCK;
+        if (perm==Permissions.READ_ONLY)
+            lockType = LockType.SHARED_LOCK;
+        else if (perm==Permissions.READ_WRITE)
+            lockType = LockType.EXCLUSIVE_LOCK;
+        lockManager.deadLockDetection(tid, pid, lockType);
+
+        // acquireLock
         if (perm==Permissions.READ_ONLY)
             lockManager.acquireSharedLock(tid, requestedPage);
         else if (perm==Permissions.READ_WRITE)
@@ -170,7 +179,11 @@ public class BufferPool {
             } catch (IOException e) {
                 throw new RuntimeException(e);
             }
+
+            // remove dependencies in dependence graph
+            lockManager.removeDependencies(tid);
         }
+
 
         // release all locks
         try {
@@ -484,6 +497,10 @@ enum LockType {
 }
 
 class Lock {
+
+    /**
+     * Thread-Safe map
+     */
     private final Map<TransactionId, LockType> transactionIdLockTypeMap;
     private final Page page;
     private LockType type;
@@ -496,7 +513,7 @@ class Lock {
         this.transactionIdLockTypeMap = new ConcurrentHashMap<>();
     }
 
-    public void lock(TransactionId acquireTid, LockType acquireType) throws InterruptedException {
+    public synchronized void lock(TransactionId acquireTid, LockType acquireType) throws InterruptedException {
 
         if (transactionIdLockTypeMap.containsKey(acquireTid) && type==LockType.EXCLUSIVE_LOCK)
             return;
@@ -506,6 +523,7 @@ class Lock {
                 && transactionIdLockTypeMap.containsKey(acquireTid)
                 && type==LockType.SHARED_LOCK
                 && acquireType==LockType.EXCLUSIVE_LOCK) {
+            transactionIdLockTypeMap.put(acquireTid, LockType.EXCLUSIVE_LOCK);
             type = LockType.EXCLUSIVE_LOCK;
             return;
         }
@@ -566,7 +584,8 @@ class Lock {
 
         LockType acquiredLockType = transactionIdLockTypeMap.get(tid);
         if (acquiredLockType!=type) {
-            throw new DbException("Lock type not match");
+            throw new DbException(String.format("Lock type not match, want release %s but lock type is %s",
+                    acquiredLockType.toString(), type.toString()));
         }
 
         synchronized (page) {
@@ -584,17 +603,44 @@ class Lock {
     public boolean isFreeLock() {
         return transactionIdLockTypeMap.isEmpty() && type==LockType.NO_LOCK && !status;
     }
+
+    public Map<TransactionId, LockType> getTransactionIdLockTypeMap() {
+        return transactionIdLockTypeMap;
+    }
+
+    public LockType getType() {
+        return type;
+    }
 }
 
 class LockManager {
 
-    private Map<PageId, Lock> pageRWLockMap;
-    private Map<TransactionId, Set<PageId>> transactionMap;
+    /**
+     * Thread-Safe map
+     */
+    private final Map<PageId, Lock> pageRWLockMap;
+
+    /**
+     * Non-Thread-Safe map
+     */
+    private final Map<TransactionId, Set<PageId>> transactionMap;
+
+    /**
+     * Thread-Safe map
+     */
+    private final Map<TransactionId, List<TransactionId>> dependenciesGraph;
+
+    /**
+     * Thread-Safe map
+     */
+    private final ConcurrentHashMap<TransactionId, Integer> dependenciesGraphInDegree;
 
     LockManager() {
         // lockMap 有多个线程同时访问同一个 Page 对应的锁的风险，因此要使用 ConcurrentHashMap
         pageRWLockMap = new ConcurrentHashMap<>();
         transactionMap = new HashMap<>();
+        dependenciesGraph = new ConcurrentHashMap<>();
+        dependenciesGraphInDegree = new ConcurrentHashMap<>();
     }
 
     /**
@@ -640,8 +686,15 @@ class LockManager {
      * @throws DbException
      */
     void releaseAllLock(TransactionId tid) throws DbException {
+        System.out.printf("transaction:%s release all of locks\n", tid.toString());
+        Set<PageId> pageIds = transactionMap.get(tid);
 
-        for (PageId pageId:transactionMap.get(tid)) {
+        // skip these transactions that haven't got locks
+        if (pageIds==null) {
+            return;
+        }
+
+        for (PageId pageId:pageIds) {
             Lock lock = pageRWLockMap.get(pageId);
             lock.unlock(tid);
             if (lock.isFreeLock())
@@ -655,6 +708,129 @@ class LockManager {
         return pageRWLockMap.containsKey(pid) && transactionMap.get(tid).contains(pid);
     }
 
+    synchronized void deadLockDetection(TransactionId tid, PageId pid, LockType type) throws TransactionAbortedException {
+
+        Lock acquireLock = pageRWLockMap.get(pid);
+
+        // there are no lock in this page yet
+        if (acquireLock == null || acquireLock.isFreeLock()) {
+            return;
+        }
+        Map<TransactionId, LockType> transactionIdLockTypeMap = acquireLock.getTransactionIdLockTypeMap();
+        LockType acquiredLockType = acquireLock.getType();
+
+        // avoid repeat add dependence
+        if (transactionIdLockTypeMap.containsKey(tid)) {
+            // this transaction already have this type of lock
+            if (type == acquiredLockType)
+                return;
+
+            // this transaction already have exclusive lock of this page and acquire shared lock
+            if (acquiredLockType==LockType.EXCLUSIVE_LOCK && type==LockType.SHARED_LOCK)
+                return;
+
+            // lock upgrade not have dependencies
+            if (transactionIdLockTypeMap.size()==1 && acquiredLockType==LockType.SHARED_LOCK
+                &&  type==LockType.EXCLUSIVE_LOCK)
+                return;
+        }
+
+        // add dependencies
+        if (type == LockType.EXCLUSIVE_LOCK) {
+            addDependencies(tid, (Map<TransactionId, LockType>) transactionIdLockTypeMap);
+        } else if (type == LockType.SHARED_LOCK) {
+            // there are no dependence between shared lock
+            if (acquiredLockType == LockType.SHARED_LOCK)
+                return;
+
+            addDependencies(tid, (Map<TransactionId, LockType>) transactionIdLockTypeMap);
+        } else {
+            throw new IllegalStateException("Not supported lock type");
+        }
+
+        // cycle dependencies detection
+        HashMap<TransactionId, Integer> inDegree = new HashMap<>(dependenciesGraphInDegree);
+        Queue<TransactionId> detectionQueue = new LinkedList<>();
+        for (Map.Entry<TransactionId, Integer> inDegreeEntry : inDegree.entrySet()) {
+            if (inDegreeEntry.getValue()==0)
+                detectionQueue.offer(inDegreeEntry.getKey());
+        }
+        // Topological Sorting
+        int removeNodeCount = 0;
+        while (!detectionQueue.isEmpty()) {
+            removeNodeCount++;
+            TransactionId removedTid = detectionQueue.poll();
+            List<TransactionId> removedDependenciesList = dependenciesGraph.get(removedTid);
+
+            // this transaction already have been committed
+            if (removedDependenciesList==null) {
+                continue;
+            }
+
+            for (TransactionId outTid : removedDependenciesList) {
+                Integer newInDegree = inDegree.get(outTid);
+                if (newInDegree==null)
+                    continue;
+                newInDegree--;
+                inDegree.put(outTid, newInDegree);
+                if (newInDegree==0)
+                    detectionQueue.offer(outTid);
+            }
+        }
+        // there are cycle dependencies
+        if (removeNodeCount<dependenciesGraphInDegree.size()) {
+            System.out.println(".43gfg");
+            removeDependencies(tid);
+            try {
+                releaseLock(tid, pid);
+            } catch (DbException e) {
+                throw new RuntimeException(e);
+            }
+            throw new TransactionAbortedException();
+        }
+
+    }
+
+    synchronized void removeDependencies(TransactionId tid) {
+        // find all nodes pointed to
+        List<TransactionId> dependenciesList = dependenciesGraph.get(tid);
+
+        // this transaction has not dependencies
+        if (dependenciesList==null)
+            return;
+
+        for (TransactionId pointToTid : dependenciesList) {
+            dependenciesGraphInDegree.computeIfPresent(pointToTid, (key,value)->value-1);
+        }
+        dependenciesGraphInDegree.remove(tid);
+        dependenciesGraph.remove(tid);
+
+        // find all nodes that point to this node, but it's seams like not necessary
+    }
+
+    private void addDependencies(TransactionId tid, Map<TransactionId, LockType> transactionIdLockTypeMap) {
+        List<TransactionId> dependenceList =
+                dependenciesGraph.computeIfAbsent(tid, k -> new ArrayList<>());
+
+        for (Map.Entry<TransactionId, LockType> entry : transactionIdLockTypeMap.entrySet()) {
+            TransactionId dependenceTid = entry.getKey();
+
+            // cannot be self-dependence
+            if (dependenceTid.equals(tid))
+                continue;
+
+            dependenceList.add(dependenceTid);
+            dependenciesGraphInDegree.put(dependenceTid,
+                    dependenciesGraphInDegree.getOrDefault(dependenceTid, 0) + 1);
+        }
+
+        if (!dependenciesGraphInDegree.containsKey(tid)) {
+            dependenciesGraphInDegree.put(tid, 0);
+        }
+
+        dependenciesGraph.put(tid, dependenceList);
+    }
+
     /**
      *
      * @param tid
@@ -662,6 +838,7 @@ class LockManager {
      * @param type
      */
     private void transactionAcquirePageLock(TransactionId tid, Page page, LockType type) {
+        System.out.printf("transaction:%s acquire lock\n", tid);
         PageId pid = page.getId();
         Lock lock = pageRWLockMap.computeIfAbsent(pid, k -> new Lock(page));
         Set<PageId> transactionPidSet = transactionMap.computeIfAbsent(tid, k -> new HashSet<PageId>());

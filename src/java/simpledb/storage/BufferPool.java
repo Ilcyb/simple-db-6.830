@@ -287,7 +287,13 @@ public class BufferPool {
     public synchronized  void flushPages(TransactionId tid) throws IOException {
         // some code goes here
         // not necessary for lab1|lab2
-        for (PageId pageId:tranPageMap.get(tid)) {
+
+        Set<PageId> pageIds = tranPageMap.get(tid);
+        if (pageIds == null) {
+            return;
+        }
+
+        for (PageId pageId:pageIds) {
             Page page = pageStore.get(pageId);
             // clean page of this transaction, have been evict from pageStore
             if (page==null) {
@@ -508,9 +514,6 @@ class Lock {
     public synchronized void lock(TransactionId acquireTid, LockType acquireType) throws InterruptedException, TransactionAbortedException {
 
         while (true) {
-            System.out.printf("transaction:%s acquire %s of page(%d,%d)\n",
-                    acquireTid, acquireType.name(), page.getId().getTableId(), page.getId().getPageNumber());
-
             if (transactionIdLockTypeMap.containsKey(acquireTid) && type==LockType.EXCLUSIVE_LOCK)
                 return;
 
@@ -692,8 +695,6 @@ class LockManager {
         for (PageId pageId:pageIds) {
             Lock lock = pageRWLockMap.get(pageId);
             lock.unlock(tid);
-            System.out.printf("transaction:%s release lock %s of page(%d,%d)\n",
-                    tid, lock.getType().name(), pageId.getTableId(), pageId.getPageNumber());
             if (lock.isFreeLock())
                 pageRWLockMap.remove(pageId);
         }

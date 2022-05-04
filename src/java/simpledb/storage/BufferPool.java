@@ -235,7 +235,7 @@ public class BufferPool {
             page.markDirty(true, tid);
             pageStore.put(page.getId(), page);
 
-            if (pageStore.size()>DEFAULT_PAGES)
+            if (pageStore.size()>numPage)
                 evictPage();
         }
     }

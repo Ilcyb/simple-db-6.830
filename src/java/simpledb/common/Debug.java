@@ -15,7 +15,8 @@ package simpledb.common;
 public class Debug {
   private static final int DEBUG_LEVEL;
   static {
-      String debug = System.getProperty("simpledb.common.Debug");
+      // set -Dsimpledb.Debug in vm options
+      String debug = System.getProperty("simpledb.Debug");
       if (debug == null) {
           // No system property = disabled
           DEBUG_LEVEL = -1;

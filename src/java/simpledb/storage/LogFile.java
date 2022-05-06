@@ -1,6 +1,7 @@
 
 package simpledb.storage;
 
+import simpledb.common.Catalog;
 import simpledb.common.Database;
 import simpledb.transaction.TransactionId;
 import simpledb.common.Debug;
@@ -460,6 +461,15 @@ public class LogFile {
             synchronized(this) {
                 preAppend();
                 // some code goes here
+                List<Page> beforePages = getAllBeforePages(tid);
+                Catalog catalog = Database.getCatalog();
+                BufferPool bufferPool = Database.getBufferPool();
+                for (Page beforePage: beforePages) {
+                    int tableId = beforePage.getId().getTableId();
+                    DbFile tableFile = catalog.getDatabaseFile(tableId);
+                    tableFile.writePage(beforePage);
+                    bufferPool.discardPage(beforePage.getId());
+                }
             }
         }
     }
@@ -487,8 +497,90 @@ public class LogFile {
             synchronized (this) {
                 recoveryUndecided = false;
                 // some code goes here
+                Set<Long> committedTrans = new HashSet<>();
+                Map<Long, List<Page>> beforePages = new HashMap<>();
+                Map<Long, List<Page>> afterPages = new HashMap<>();
+                try (RandomAccessFile myRaf = new RandomAccessFile(logFile, "r");) {
+                    long lastCKPOffset = myRaf.readLong();
+//                    if (lastCKPOffset!=-1)
+//                        myRaf.seek(lastCKPOffset);
+                    // CHECKPOINT_RECORD
+                    while (true) {
+                        int type = myRaf.readInt();
+                        // -1
+                        long tid = myRaf.readLong();
+                        switch (type) {
+                            case CHECKPOINT_RECORD:
+                                int transNum = myRaf.readInt();
+                                for (int i = 0; i < transNum; i++) {
+                                    // tid
+                                    myRaf.readLong();
+                                    // offset
+                                    myRaf.readLong();
+                                }
+                                break;
+                            case UPDATE_RECORD:
+                                if (!beforePages.containsKey(tid))
+                                    beforePages.put(tid, new ArrayList<>());
+                                beforePages.get(tid).add(readPageData(myRaf));
+
+                                if (!afterPages.containsKey(tid))
+                                    afterPages.put(tid, new ArrayList<>());
+                                afterPages.get(tid).add(readPageData(myRaf));
+                                break;
+                            case COMMIT_RECORD:
+                                committedTrans.add(tid);
+                                break;
+                            default:
+                                break;
+                        }
+                        myRaf.readLong();
+                    }
+
+                } catch (EOFException ignore) {
+
+                }
+
+                for (Long tid : beforePages.keySet()) {
+                    if (!committedTrans.contains(tid)) {
+                        for (Page beforePage : beforePages.get(tid)) {
+                            Database.getCatalog().getDatabaseFile(
+                                    beforePage.getId().getTableId()).writePage(beforePage);
+                        }
+                    }
+                }
+
+                for (Long committedTranId : committedTrans) {
+                    if (!afterPages.containsKey(committedTranId))
+                        continue;
+                    for (Page afterPage : afterPages.get(committedTranId)) {
+                        Database.getCatalog().getDatabaseFile(
+                                afterPage.getId().getTableId()).writePage(afterPage);
+                    }
+                }
+
             }
          }
+    }
+
+    private long getLastCheckpointOffset() throws IOException {
+        long lastCKPOffset = 0;
+        try (RandomAccessFile myRaf = new RandomAccessFile(logFile, "r");) {
+            while (true) {
+                int type = myRaf.readInt();
+                long transId = myRaf.readLong();
+                if (type==UPDATE_RECORD) {
+                    readPageData(myRaf);
+                    readPageData(myRaf);
+                }
+                long offset = myRaf.readLong();
+                if (type==CHECKPOINT_RECORD)
+                    lastCKPOffset = offset;
+            }
+        } catch (EOFException ignore) {
+
+        }
+        return lastCKPOffset;
     }
 
     /** Print out a human readable represenation of the log */
@@ -571,4 +663,29 @@ public class LogFile {
         raf.getChannel().force(true);
     }
 
+    private List<Page> getAllBeforePages(TransactionId tid) {
+        long fileOffset = tidToFirstLogRecord.get(tid.getId());
+        List<Page> pages = new ArrayList<>();
+        try (RandomAccessFile myRaf = new RandomAccessFile(logFile, "r");) {
+            myRaf.seek(fileOffset);
+            while (true) {
+                int type = myRaf.readInt();
+                long transId = myRaf.readLong();
+                if (type==UPDATE_RECORD) {
+                    if (transId==tid.getId())
+                        pages.add(readPageData(myRaf));
+                    else
+                        readPageData(myRaf);
+                    // skip after page data
+                    readPageData(myRaf);
+                }
+                long offset = myRaf.readLong();
+            }
+        } catch (EOFException ignored) {
+            // read end of file
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        return pages;
+    }
 }

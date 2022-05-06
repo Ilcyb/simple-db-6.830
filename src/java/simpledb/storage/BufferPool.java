@@ -93,6 +93,9 @@ public class BufferPool {
             pageStore.put(pid, requestedPage);
         }
 
+        // null tid for test purpose
+        if (tid==null)
+            tid = new TransactionId();
         // save relationship between transaction and page
         tranPageMap.computeIfAbsent(tid, k->new HashSet<>()).add(pid);
 
@@ -167,7 +170,7 @@ public class BufferPool {
         } else {
             // save dirty page data to disk
             try {
-                flushPages(tid);
+                flushPages(tid, true);
             } catch (IOException e) {
                 throw new RuntimeException(e);
             }
@@ -277,14 +280,25 @@ public class BufferPool {
     private synchronized  void flushPage(PageId pid) throws IOException {
         // some code goes here
         // not necessary for lab1
+
+        Page page = pageStore.get(pid);
+
+        // append an update record to the log, with
+        // a before-image and after-image.
+        TransactionId dirtier = page.isDirty();
+        if (dirtier != null){
+            Database.getLogFile().logWrite(dirtier, page.getBeforeImage(), page);
+            Database.getLogFile().force();
+        }
+
         DbFile dbFile = Database.getCatalog().getDatabaseFile(pid.getTableId());
-        dbFile.writePage(pageStore.get(pid));
+        dbFile.writePage(page);
         pageStore.get(pid).markDirty(false, null);
     }
 
     /** Write all pages of the specified transaction to disk.
      */
-    public synchronized  void flushPages(TransactionId tid) throws IOException {
+    public synchronized  void flushPages(TransactionId tid, boolean commit) throws IOException {
         // some code goes here
         // not necessary for lab1|lab2
 
@@ -299,6 +313,12 @@ public class BufferPool {
             if (page==null) {
                 continue;
             }
+
+            // use current page contents as the before-image
+            // for the next transaction that modifies this page.
+            if (commit)
+                page.setBeforeImage();
+
             if (page.isDirty()!=null) {
                 flushPage(pageId);
             }
@@ -313,21 +333,7 @@ public class BufferPool {
         // some code goes here
         // not necessary for lab1
 
-        Page cleanPage = null;
-        for (LRUMap<PageId, Page>.ValIterator it = pageStore.ValIterator(); it.hasNext(); ) {
-            Page page = it.next();
-            if (page.isDirty()!=null) {
-                continue;
-            }
-            cleanPage=page;
-            break;
-        }
-
-        if (cleanPage==null) {
-            throw new DbException("There are no clean page to evict");
-        }
-
-        PageId removedPid = cleanPage.getId();
+        PageId removedPid = pageStore.getLast();
         try {
             flushPage(removedPid);
         } catch (IOException e) {
